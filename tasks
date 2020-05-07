@@ -1,0 +1,5 @@
+4.5.2020
+
+- create a github repo for cockpit ovirt
+- create a design doc for ansible-runner wrapper/plugin
+- finish virtio-win installer deep dive

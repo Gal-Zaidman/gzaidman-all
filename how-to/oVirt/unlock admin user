@@ -1,0 +1,5 @@
+# See user details
+ovirt-aaa-jdbc-tool user show admin
+
+# unlock admin
+ovirt-aaa-jdbc-tool user unlock admin

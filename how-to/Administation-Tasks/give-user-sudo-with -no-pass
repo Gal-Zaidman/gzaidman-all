@@ -1,0 +1,6 @@
+One way to enable a user (someuser in the following example) to use sudo to become root
+without a password is to install a file with the appropriate directives into the
+/etc/sudoers.d directory (owned by root, with octal permissions 0400):
+
+    ## password-less sudo for Ansible user
+    someuser ALL=(ALL) NOPASSWD:ALL

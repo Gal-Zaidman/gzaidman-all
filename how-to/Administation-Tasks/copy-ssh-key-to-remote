@@ -1,0 +1,2 @@
+1. make sure yout have a pub and private key, if not use ssh-keygen
+2. ssh-copy-id root@web1.example.com
