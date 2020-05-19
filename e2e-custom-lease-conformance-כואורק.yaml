@@ -1,0 +1,320 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name:   e2e-custom-lease-conformance1
+  labels:
+    jobgroup: ansible-runner
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      name:   e2e-custom-lease-conformance1
+      labels:
+        jobgroup: ansible-runner
+    spec:
+      backoffLimit: 0
+      terminationGracePeriodSeconds: 900
+      containers:
+      - name: lease
+        image: registry.svc.ci.openshift.org/ci/boskoscli:latest
+        terminationMessagePolicy: FallbackToLogsOnError
+        resources:
+          requests:
+            cpu: 10m
+            memory: 10Mi
+          limits:
+            memory: 200Mi
+        volumeMounts:
+        - name: shared-tmp
+          mountPath: /tmp/shared
+        - name: cluster-profile
+          mountPath: /etc/openshift-installer
+        - name: installer-artifacts
+          mountPath: /tmp/shared/artifacts
+        env:
+        - name: CLUSTER_TYPE
+          value: "ovirt"
+        - name: CLUSTER_NAME
+          value: "ovirt-manual-run"
+        - name: LEASE_TYPE
+          value: "conformance"
+        command:
+        - /bin/bash
+        - -c
+        - |
+          #!/bin/bash
+          set -euo pipefail
+
+          trap 'rc=$?; CHILDREN=$(jobs -p); if test -n "${CHILDREN}"; then kill ${CHILDREN} && wait; fi; if test "${rc}" -ne 0; then touch /tmp/shared/exit; fi; exit "${rc}"' EXIT
+
+          function extract_leases_info() {
+            echo "$( jq ."${1}" --raw-output "${2}" )"
+          }
+
+          custom_lease="ovirt-10"
+          lease_path="/etc/openshift-installer/${custom_lease}.json"
+
+          #Saving parameters for the env
+          cat > /tmp/shared/ovirt-lease.conf <<EOF
+          OVIRT_APIVIP="$(extract_leases_info ovirt_apivip ${lease_path})"
+          OVIRT_DNSVIP="$(extract_leases_info ovirt_dnsvip ${lease_path})"
+          OVIRT_INGRESSVIP="$(extract_leases_info ovirt_ingressvip ${lease_path})"
+          WORKER_CPU="4"
+          WORKER_MEM="8192"
+          MASTER_CPU="4"
+          MASTER_MEM="8192"
+          OCP_CLUSTER="$(extract_leases_info cluster_name ${lease_path})"
+          OVIRT_NETWORK_NAME="$(extract_leases_info ovirt_network_name ${lease_path})"
+          OVIRT_VNIC_PROFILE_ID="$(extract_leases_info ovirt_vnic_profile_id ${lease_path})"
+          OVIRT_ENGINE_CLUSTER_ID="$(extract_leases_info ovirt_engine_cluster_id ${lease_path})"
+          OVIRT_ENGINE_TEMPLATE_NAME="$(extract_leases_info ovirt_engine_template_name ${lease_path})"
+          EOF
+
+          touch /tmp/shared/leased
+
+          while true; do
+            if [[ -f /tmp/shared/exit ]]; then
+              echo "Another process exited" 2>&1
+              exit 0
+            fi
+
+            sleep 15 & wait $!
+          done
+
+      - name: setup
+        image: quay.io/openshift/origin-ovirt-installer:4.5
+        terminationMessagePolicy: FallbackToLogsOnError
+        volumeMounts:
+        - name: shared-tmp
+          mountPath: /tmp/shared
+        - name: cluster-profile
+          mountPath: /etc/openshift-installer
+        - name: installer-artifacts
+          mountPath: /tmp/shared/artifacts
+        env:
+        - name: SSH_PUB_KEY_PATH
+          value: /etc/openshift-installer/ssh-publickey
+        - name: PULL_SECRET_PATH
+          value: /etc/openshift-installer/pull-secret
+        - name: USER
+          value: test
+        - name: HOME
+          value: /tmp
+        - name: OPENSHIFT_INSTALL_RELEASE_IMAGE_OVERRIDE
+          value: registry.svc.ci.openshift.org/ocp/release:4.5-ci
+        command:
+        - /bin/sh
+        - -c
+        - |
+          #!/bin/sh
+          trap 'rc=$?; if test "${rc}" -eq 0; then touch /tmp/shared/01_install.done; else touch /tmp/shared/01_install.exit; fi; exit "${rc}"' EXIT
+          trap 'CHILDREN=$(jobs -p); if test -n "${CHILDREN}"; then kill ${CHILDREN} && wait; fi' TERM
+
+          ## Wait untill lease is acquired
+          while true; do
+          if [[ -f /tmp/shared/exit ]]; then
+            echo "Another process exited" 2>&1
+            exit 1
+          fi
+          if [[ -f /tmp/shared/leased ]]; then
+            echo "Lease acquired, installing..."
+            break
+          fi
+          sleep 15 & wait
+          done
+
+          cp "$(command -v openshift-install)" /tmp
+          mkdir -p /tmp/shared/artifacts/installer
+
+          ## update the IDs for new cluster
+          source /tmp/shared/ovirt-lease.conf
+          source /etc/openshift-installer/ovirt.conf
+
+          export PATH=$PATH:/tmp/shared
+          export EXPIRATION_DATE=$(date -d '4 hours' --iso=minutes --utc)
+          export SSH_PUB_KEY=$(cat "${SSH_PUB_KEY_PATH}")
+          export PULL_SECRET=$(cat "${PULL_SECRET_PATH}")
+          export TF_VAR_ovirt_template_mem=${WORKER_MEM}
+          export TF_VAR_ovirt_template_cpu=${WORKER_CPU}
+          export TF_VAR_ovirt_master_mem=${MASTER_MEM}
+          export TF_VAR_ovirt_master_cpu=${MASTER_CPU}
+
+          ## Image handling - for now the CI uses a fixed rhcos template
+          ## TODO - the fixed template is saving time and space when creating the
+          ## cluster in the cost of having to maitain the supported version. This
+          ## maintnance procedure does not exist yet.
+          export OPENSHIFT_INSTALL_OS_IMAGE_OVERRIDE="${OVIRT_ENGINE_TEMPLATE_NAME}-8G"
+
+          # We want the setup to download the latest CA from the engine
+          # Therefor living it empty
+          export OVIRT_CONFIG=/tmp/shared/artifacts/installer/ovirt-config.yaml
+          cat > /tmp/shared/artifacts/installer/ovirt-config.yaml <<EOF
+          ovirt_url: ${OVIRT_ENGINE_URL}
+          ovirt_username: ${OVIRT_ENGINE_USERNAME}
+          ovirt_password: ${OVIRT_ENGINE_PASSWORD}
+          ovirt_cafile: ""
+          ovirt_insecure: true
+          EOF
+
+          cat > /tmp/shared/artifacts/installer/install-config.yaml << EOF
+          apiVersion: v1
+          baseDomain: ${BASE_DOMAIN}
+          metadata:
+            name: ${OCP_CLUSTER}
+          compute:
+          - hyperthreading: Enabled
+            name: worker
+            platform:
+              ovirt:
+                cpu:
+                  cores: ${WORKER_CPU}
+                  sockets: 1
+                memoryMB: ${WORKER_MEM}
+                osDisk:
+                  sizeGB: 17
+                vmType: server
+                instanceTypeID:
+            replicas: 2
+          controlPlane:
+            hyperthreading: Enabled
+            name: master
+            platform:
+              ovirt:
+                cpu:
+                  cores: ${MASTER_CPU}
+                  sockets: 1
+                memoryMB: ${MASTER_MEM}
+                osDisk:
+                  sizeGB: 17
+                vmType: server
+                instanceTypeID:
+            replicas: 3
+          platform:
+            ovirt:
+              ovirt_cluster_id: ${OVIRT_ENGINE_CLUSTER_ID}
+              ovirt_storage_domain_id: ${OVIRT_ENGINE_STORAGE_DOMAIN_ID}
+              api_vip: ${OVIRT_APIVIP}
+              dns_vip: ${OVIRT_DNSVIP}
+              ingress_vip: ${OVIRT_INGRESSVIP}
+              ovirt_network_name: ${OVIRT_NETWORK_NAME}
+              vnicProfileID: ${OVIRT_VNIC_PROFILE_ID}
+
+          pullSecret: >
+            ${PULL_SECRET}
+          sshKey: |
+            ${SSH_PUB_KEY}
+          EOF
+
+          function update_image_registry() {
+            while true; do
+              sleep 10;
+              oc get configs.imageregistry.operator.openshift.io/cluster >/dev/null 2>&1 && break
+            done
+            oc patch configs.imageregistry.operator.openshift.io cluster --type merge --patch '{"spec":{"managementState":"Managed","storage":{"emptyDir":{}}}}'
+          }
+
+
+          cd /tmp/shared/artifacts
+
+          #download oc if missing
+          if [ ! -f oc ] ; then
+            echo "downloading oc binary"
+            wget https://mirror.openshift.com/pub/openshift-v4/clients/oc/4.5/linux/oc.tar.gz -O oc.tar.gz
+            tar xvfz oc.tar.gz
+            chmod +x ./oc
+          fi
+          export PATH=$PATH:/tmp/shared/artifacts
+
+          TF_LOG=debug openshift-install --dir=/tmp/shared/artifacts/installer create ignition-configs --log-level=debug
+          python -c \
+              'import json, sys; j = json.load(sys.stdin); j[u"systemd"][u"units"] = [{u"contents": "[Unit]\nDescription=Mount etcd as a ramdisk\nBefore=local-fs.target\n[Mount]\n What=none\nWhere=/var/lib/etcd\nType=tmpfs\nOptions=size=2G\n[Install]\nWantedBy=local-fs.target", u"enabled": True, u"name":u"var-lib-etcd.mount"}]; json.dump(j, sys.stdout)' \
+              </tmp/shared/artifacts/installer/master.ign \
+              >/tmp/shared/artifacts/installer/master.ign.out
+          mv /tmp/shared/artifacts/installer/master.ign.out /tmp/shared/artifacts/installer/master.ign
+
+          export KUBECONFIG=/tmp/shared/artifacts/installer/auth/kubeconfig
+          update_image_registry &
+
+          # What we're doing here is we generate manifests first and force that OpenShift SDN is configured.
+          TF_LOG=debug openshift-install --dir=/tmp/shared/artifacts/installer create manifests --log-level=debug
+          echo "done with manifests"
+          sed -i '/^  channel:/d' /tmp/artifacts/installer/manifests/cvo-overrides.yaml
+          # This is for debugging purposes, allows us to map a job to a VM
+          cat /tmp/artifacts/installer/manifests/cluster-infrastructure-02-config.yml
+          export KUBECONFIG=/tmp/artifacts/installer/auth/kubeconfig
+          update_image_registry &
+
+          TF_LOG=debug openshift-install --dir=/tmp/shared/artifacts/installer create cluster --log-level=debug &
+          wait "$!"
+
+          install_exit_status=$?
+          exit $install_exit_status
+
+      - name: run-conformance-tests
+        image: 'registry.svc.ci.openshift.org/ovirt/openshift-tests:eslutsky'
+        imagePullPolicy: IfNotPresent
+        terminationMessagePolicy: FallbackToLogsOnError
+        volumeMounts:
+        - name: config-gcp-secrets
+          mountPath: /runner/gcp-secrets
+        - name: shared-tmp
+          mountPath: /tmp/shared
+        - name: installer-artifacts
+          mountPath: /tmp/sharedartifacts
+        - name: cluster-profile
+          mountPath: /etc/openshift-installer
+        resources:
+          requests:
+            cpu: 1
+            memory: 1Gi
+          limits:
+            memory: 7Gi
+        command:
+        - /bin/sh
+        - -c
+        - |
+          #!/bin/bash
+          trap 'rc=$?;  touch /tmp/shared/02_tests.done ; exit "${rc}"' EXIT
+          trap 'CHILDREN=$(jobs -p); if test -n "${CHILDREN}"; then kill ${CHILDREN} && wait; fi' TERM
+
+          set -euo pipefail
+          echo "waiting for installation to complete..."
+          while true; do
+            if [[ -f /tmp/shared/01_install.done ]]; then
+              break
+            fi
+            sleep 20 & wait
+          done
+          echo "beginnging testing..."
+
+          export KUBECONFIG=/tmp/shared/artifacts/installer/auth/kubeconfig
+          cd /tmp/shared/artifacts
+
+          mkdir -p junit/
+
+          if [ ! -f $KUBECONFIG ] ; then
+            echo -e "Couldnt find KUBECONFIG at $KUBECONFIG"
+            exit 22
+          fi
+
+          openshift-tests run openshift/conformance/parallel --dry-run | grep 'Early' | openshift-tests run -o /tmp/artifacts/e2e.log --junit-dir /tmp/artifacts/junit -f -
+          sleep 360m
+      volumes:
+        - name: config-gcp-secrets
+          secret:
+            secretName: ovirt-infra-gcp-secrets
+        - name: cluster-profile
+          projected:
+            sources:
+            - secret:
+                name: cluster-secrets-ovirt
+            - secret:
+                name: ovirt-infra-secrets
+        - name: shared-tmp
+          emptyDir: {}
+        - name: installer-artifacts
+          emptyDir: {}
+        - name: scripts
+          configMap:
+            name: ocp-on-rhv-ci-scripts
+      restartPolicy: Never

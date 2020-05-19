@@ -1,0 +1,4 @@
+#disable
+sudo sed 's|enabled=1|enabled=0|' -i /etc/yum.repos.d/ovirt-master-dependencies.repo
+#enable
+sudo sed 's|enabled=0|enabled=1|' -i /etc/yum.repos.d/ovirt-master-dependencies.repo

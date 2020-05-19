@@ -1,0 +1,149 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: e2e-custom-lease-conformance
+  labels:
+    jobgroup: ansible-runner
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      name: e2e-custom-lease-conformance
+      labels:
+        jobgroup: ansible-runner
+    spec:
+      backoffLimit: 0
+      terminationGracePeriodSeconds: 900
+      containers:
+      - name: lease
+        image: registry.svc.ci.openshift.org/ci/boskoscli:latest
+        terminationMessagePolicy: FallbackToLogsOnError
+        resources:
+          requests:
+            cpu: 10m
+            memory: 10Mi
+          limits:
+            memory: 200Mi
+        volumeMounts:
+        - name: shared-tmp
+          mountPath: /tmp/shared
+        - name: cluster-profile
+          mountPath: /etc/openshift-installer
+        - name: installer-artifacts
+          mountPath: /tmp/shared/artifacts
+        - name: ocp-on-rhv-ci-scripts
+          mountPath: /tmp/shared/scripts
+        env:
+        - name: CLUSTER_TYPE
+          value: "ovirt"
+        - name: CLUSTER_NAME
+          value: "ovirt-manual-run"
+        - name: LEASE_TYPE
+          value: "conformance"
+        command:
+        - /bin/bash
+        - -c
+        - |
+          #!/bin/bash
+          bash /tmp/shared/scripts/custom-lease.sh
+
+      - name: setup
+        image: quay.io/openshift/origin-ovirt-installer:4.5
+        terminationMessagePolicy: FallbackToLogsOnError
+        volumeMounts:
+        - name: shared-tmp
+          mountPath: /tmp/shared
+        - name: cluster-profile
+          mountPath: /etc/openshift-installer
+        - name: installer-artifacts
+          mountPath: /tmp/shared/artifacts
+        - name: ocp-on-rhv-ci-scripts
+          mountPath: /tmp/shared/scripts
+        env:
+        - name: SSH_PUB_KEY_PATH
+          value: /etc/openshift-installer/ssh-publickey
+        - name: PULL_SECRET_PATH
+          value: /etc/openshift-installer/pull-secret
+        - name: USER
+          value: test
+        - name: HOME
+          value: /tmp
+        - name: OPENSHIFT_INSTALL_RELEASE_IMAGE_OVERRIDE
+          value: registry.svc.ci.openshift.org/ocp/release:4.5-ci
+        command:
+        - /bin/sh
+        - -c
+        - |
+          #!/bin/sh
+          bash /tmp/shared/scripts/custom-lease.sh
+          install_exit_status=$?
+          sleep 360m
+          exit $install_exit_status
+
+      - name: run-conformance-tests
+        image: 'registry.svc.ci.openshift.org/ovirt/openshift-tests:eslutsky'
+        imagePullPolicy: IfNotPresent
+        terminationMessagePolicy: FallbackToLogsOnError
+        volumeMounts:
+        - name: config-gcp-secrets
+          mountPath: /runner/gcp-secrets
+        - name: shared-tmp
+          mountPath: /tmp/shared
+        - name: installer-artifacts
+          mountPath: /tmp/sharedartifacts
+        - name: cluster-profile
+          mountPath: /etc/openshift-installer
+        resources:
+          requests:
+            cpu: 1
+            memory: 1Gi
+          limits:
+            memory: 7Gi
+        command:
+        - /bin/sh
+        - -c
+        - |
+          #!/bin/bash
+          trap 'rc=$?;  touch /tmp/shared/02_tests.done ; exit "${rc}"' EXIT
+          trap 'CHILDREN=$(jobs -p); if test -n "${CHILDREN}"; then kill ${CHILDREN} && wait; fi' TERM
+
+          set -euo pipefail
+          echo "waiting for installation to complete..."
+          while true; do
+            if [[ -f /tmp/shared/01_install.done ]]; then
+              break
+            fi
+            sleep 20 & wait
+          done
+          echo "beginnging testing..."
+
+          export KUBECONFIG=/tmp/artifacts/installer/auth/kubeconfig
+          cd /tmp/artifacts
+
+          mkdir -p junit/
+
+          if [ ! -f $KUBECONFIG ] ; then
+            echo -e "Couldnt find KUBECONFIG at $KUBECONFIG"
+            exit 22
+          fi
+
+          openshift-tests run openshift/conformance/parallel -o run_conformance.log --junit-dir junit/
+      volumes:
+        - name: config-gcp-secrets
+          secret:
+            secretName: ovirt-infra-gcp-secrets
+        - name: cluster-profile
+          projected:
+            sources:
+            - secret:
+                name: cluster-secrets-ovirt
+            - secret:
+                name: ovirt-infra-secrets
+        - name: shared-tmp
+          emptyDir: {}
+        - name: installer-artifacts
+          emptyDir: {}
+        - name: scripts
+          configMap:
+            name: ocp-on-rhv-ci-scripts
+      restartPolicy: Never

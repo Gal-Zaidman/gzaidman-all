@@ -1,0 +1,11 @@
+to make keychron work with bluetooth and functions keys create:
+
+cat /etc/systemd/system/keychron.service
+Description=The command to make the Keychron K4 work
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -l -c 'echo 0 > /sys/module/hid_apple/parameters/fnmode'
+
+[Install]
+WantedBy=multi-user.target
