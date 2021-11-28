@@ -1,5 +1,0 @@
-su - postgres -c 'scl enable rh-postgresql10 -- psql'
-
-when we are in we need to log into the engine db
-
-\c engine

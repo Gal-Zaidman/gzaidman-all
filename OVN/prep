@@ -1,0 +1,18 @@
+Nice
+- DPU
+- integration with common SDNs like OVN, Calico.
+- Architecture for Kubernetes CNIs, NFD and operators for DPU management.
+- Define DPU Service Function Chaining management (SFC)
+
+Must
+- Familiar with OpenShift and OVN
+- Experience with Kubernetes, networking CNIs and services deployment
+
+- Expert level knowledge in Ethernet/IP technologies and network data path
+- Container management and deployment experience
+- Experienced in system software design and operating system fundamentals
+
+Bridge, Tunnel, tap device vs eth, gateway
+Multus
+Calico
+HELM CHART
